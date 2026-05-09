@@ -726,10 +726,13 @@ class PuzzleEngine {
     this.dispW = this.pieceW * displayScale;
     this.dispH = this.pieceH * displayScale;
 
-    // Yüksek çözünürlük: parça canvas'ı ekranda ne kadar küçük olursa
-    // olsun en az MIN_PIECE_PX piksel olsun (keskin görüntü için).
-    const MIN_PIECE_PX = 300;
-    this.pieceScale = Math.max(1, MIN_PIECE_PX / Math.min(this.dispW, this.dispH));
+    // pieceScale: kaynak parça pikselini ekran parça pikselinden büyük tutarak keskinlik sağla.
+    // 2400px kaynak, 100 parça → pieceW=240px, dispW=~ekran/grid → genelde ps=1 yeterli.
+    const MIN_PIECE_PX = 60;
+    const MAX_CANVAS_PX = 1024;
+    const rawScale = MIN_PIECE_PX / Math.min(this.dispW, this.dispH);
+    const maxScaleByLimit = MAX_CANVAS_PX / (Math.max(this.pieceW, this.pieceH) * 1.6);
+    this.pieceScale = Math.max(1, Math.min(rawScale, maxScaleByLimit));
 
     this.pieces = [];
 
@@ -745,80 +748,92 @@ class PuzzleEngine {
 
   /** Tek parça objesi oluşturur */
   _buildPiece(row, col, idx) {
-    // ps: yüksek çözünürlük çarpanı
-    const ps        = this.pieceScale;
-    const pDispW    = this.dispW * ps;
-    const pDispH    = this.dispH * ps;
+    const ps = this.pieceScale;  // yüksek çözünürlük çarpanı
 
-    const TAB_SIZE  = Math.min(pDispW, pDispH) * 0.28; // tab dışarı taşma miktarı (yüksek res)
-    const padding   = TAB_SIZE + 4;
+    // ── Kaynak uzayı (source piksel) ──
+    // Her parçanın kaynak görseldeki tam alanı
+    const srcPieceW = this.pieceW;   // = source.width  / cols
+    const srcPieceH = this.pieceH;   // = source.height / rows
 
-    // Yüksek çözünürlüklü canvas boyutu
-    const canvasW   = Math.ceil(pDispW + padding * 2);
-    const canvasH   = Math.ceil(pDispH + padding * 2);
+    // Tab'ın kaynak uzayında taştığı miktar (parça boyutunun ~%28'i)
+    // Clip path TAB_SIZE ile eşleşmeli; TAB_SIZE = pDispW*0.28 = srcPieceW*ps*0.28*ps... hayır:
+    // TAB_SIZE ekran canvas pikselinde; kaynak karşılığı = TAB_SIZE / ps = srcPieceW * 0.28
+    const srcPad = srcPieceW * 0.30;  // tab taşması + küçük güvenlik payı (kaynak px)
+
+    // Kaynak bölgesi: bu parçanın payı + her kenardan srcPad kadar komşu alınır
+    const srcX = col * srcPieceW - srcPad;
+    const srcY = row * srcPieceH - srcPad;
+    const srcW = srcPieceW + srcPad * 2;
+    const srcH = srcPieceH + srcPad * 2;
+
+    // ── Yüksek çözünürlüklü canvas (render piksel) ──
+    const canvasW = Math.ceil(srcW * ps);
+    const canvasH = Math.ceil(srcH * ps);
+
+    // Padding ekran/dünya biriminde (drawImage hedefi ve clip path için)
+    const padding  = srcPad * ps;        // = srcPad * ps (canvas px)
+    const pDispW   = srcPieceW * ps;     // parçanın net genişliği (canvas px)
+    const pDispH   = srcPieceH * ps;
+    const TAB_SIZE = pDispW * 0.28;      // clip path'teki tab yüksekliği (canvas px)
 
     const cv  = document.createElement('canvas');
     cv.width  = canvasW;
     cv.height = canvasH;
     const ctx = cv.getContext('2d');
+    if (!ctx) {
+      // Canvas boyutu tarayıcı limitini aştı — pieceScale'i düşür ve tekrar dene
+      this.pieceScale = Math.max(1, this.pieceScale * 0.5);
+      return this._buildPiece(row, col, idx);
+    }
 
-    // Tab değerleri: +1 tab dışarı, -1 blank içeri
-    const topTab    = row > 0             ? -this.edges[row-1][col].bottom   : 0;
-    const bottomTab = row < this.rows - 1 ?  this.edges[row][col].bottom     : 0;
-    const leftTab   = col > 0             ? -this.edges[row][col-1].right    : 0;
-    const rightTab  = col < this.cols - 1 ?  this.edges[row][col].right      : 0;
+    // Tab değerleri
+    const topTab    = row > 0             ? -this.edges[row-1][col].bottom : 0;
+    const bottomTab = row < this.rows - 1 ?  this.edges[row][col].bottom   : 0;
+    const leftTab   = col > 0             ? -this.edges[row][col-1].right  : 0;
+    const rightTab  = col < this.cols - 1 ?  this.edges[row][col].right    : 0;
 
-    // Clip path çiz (yüksek çözünürlüklü koordinatlarda)
-    ctx.save();
-    this._drawPiecePath(ctx, padding, padding, pDispW, pDispH,
-      topTab, rightTab, bottomTab, leftTab, TAB_SIZE);
-    ctx.clip();
-
-    // Kaynak görseli yüksek çözünürlüklü canvas'a çiz
-    // srcTabPx: padding'in kaynak piksel uzayındaki karşılığı
-    const srcPaddingPx = padding / ps;
+    // 1. Kaynak görseli canvas'a çiz (clipsiz, tam alan)
     ctx.drawImage(
       this.source,
-      col * this.pieceW - srcPaddingPx,     // sx: parça başlangıcı - padding
-      row * this.pieceH - srcPaddingPx,     // sy
-      this.pieceW + srcPaddingPx * 2,       // sw: parça genişliği + iki kenar padding
-      this.pieceH + srcPaddingPx * 2,       // sh
-      0, 0, canvasW, canvasH                // hedef: tüm canvas
+      srcX, srcY, srcW, srcH,      // kaynak: parça + tab taşması (kaynak px)
+      0,    0,    canvasW, canvasH  // hedef: tüm yüksek-res canvas
     );
+
+    // 2. Clip path ile kes — sadece bu parçanın şekli kalsın
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-in';
+    this._drawPiecePath(ctx, padding, padding, pDispW, pDispH,
+      topTab, rightTab, bottomTab, leftTab, TAB_SIZE);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
     ctx.restore();
 
-    // Outline (yüksek çözünürlüklü)
+    // 3. Outline
     ctx.save();
     this._drawPiecePath(ctx, padding, padding, pDispW, pDispH,
       topTab, rightTab, bottomTab, leftTab, TAB_SIZE);
-    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-    ctx.lineWidth   = 1.5 * ps;
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    ctx.lineWidth   = 1.2 * ps;
     ctx.stroke();
     ctx.restore();
 
-    // Ekran (dünya) koordinatına geri dönüştürülmüş boyutlar
-    const drawPadding = padding / ps;
-    const drawW = canvasW / ps;
-    const drawH = canvasH / ps;
+    // Dünya koordinatı boyutları: dispW/H + padding kenarları (ekran birimi)
+    const drawPadding = srcPad * this.displayScale;
+    const drawW = this.dispW + drawPadding * 2;
+    const drawH = this.dispH + drawPadding * 2;
 
     return {
-      idx,
-      row,
-      col,
-      canvas:    cv,
-      padding:   drawPadding,  // dünya koordinatında (ekran birimi)
-      canvasW:   drawW,        // dünya koordinatında canvas boyutu
-      canvasH:   drawH,
+      idx, row, col,
+      canvas:     cv,
+      padding:    drawPadding,
+      canvasW:    drawW,
+      canvasH:    drawH,
       pieceScale: ps,
-      // Oyun dünya koordinatı (parçanın sol-üst noktası, padding dahil değil)
-      x: 0,
-      y: 0,
-      // Doğru konumda olduğu hedef koordinat
+      x: 0, y: 0,
       targetX: col * this.dispW,
       targetY: row * this.dispH,
       joined:  false,
       groupId: null,
-      // Tab değerleri snap kontrolü için
       topTab, rightTab, bottomTab, leftTab,
     };
   }
@@ -941,10 +956,10 @@ class PuzzleEngine {
     if (moved.joined && neighbor.joined) continue;
 
     let expectedDX = 0, expectedDY = 0;
-    if (dir === 'right')  expectedDX =  this.dispW;
-    if (dir === 'left')   expectedDX = -this.dispW;
-    if (dir === 'bottom') expectedDY =  this.dispH;
-    if (dir === 'top')    expectedDY = -this.dispH;
+    if (dir === 'right')  expectedDX =  neighbor.targetX - moved.targetX;
+    if (dir === 'left')   expectedDX =  neighbor.targetX - moved.targetX;
+    if (dir === 'bottom') expectedDY =  neighbor.targetY - moved.targetY;
+    if (dir === 'top')    expectedDY =  neighbor.targetY - moved.targetY;
 
     // Padding'siz gerçek parça koordinatları
     const movedPX    = moved.x    + moved.padding;
@@ -1410,13 +1425,10 @@ class GameCanvas {
     const e   = this.engine;
     for (const p of e.pieces) {
       if (!p.joined) continue;
-      ctx.drawImage(
-        p.canvas,
-        this.boardOffX + p.col * e.dispW - p.padding,
-        this.boardOffY + p.row * e.dispH - p.padding,
-        p.canvasW,
-        p.canvasH
-      );
+      // col*dispW ve row*dispH float olabilir; Math.round ile piksel hizası koru
+      const dx = this.boardOffX + p.col * e.dispW - p.padding;
+      const dy = this.boardOffY + p.row * e.dispH - p.padding;
+      ctx.drawImage(p.canvas, dx, dy, p.canvasW, p.canvasH);
     }
   }
 
@@ -1859,8 +1871,8 @@ async function startGame(seed, pieces) {
   showLoading('Görsel üretiliyor…', 5);
   await sleep(30);
 
-  // 1. Görsel üret
-  const sourceCanvas = ImageGen.generateImage(seed, 15000);
+  // 1. Görsel üret — 2400px yeterli, 15000px belleği patlatıyor
+  const sourceCanvas = ImageGen.generateImage(seed, 2400);
   setLoading('Parçalar kesiliyor…', 40);
   await sleep(30);
 
@@ -1873,7 +1885,7 @@ async function startGame(seed, pieces) {
   // Parça display boyutu: ekranın ~%70'ine tahta sığsın (başlangıç zoom fit)
   const scaleX  = (gameW * 0.70) / (engine.cols * engine.pieceW);
   const scaleY  = (gameH * 0.70) / (engine.rows * engine.pieceH);
-  const dispScale = Math.min(scaleX, scaleY, 1.4);
+  const dispScale = Math.min(scaleX, scaleY, 0.8);
 
   setLoading('Canvas oluşturuluyor…', 60);
   await sleep(20);
