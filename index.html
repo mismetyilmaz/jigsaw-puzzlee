@@ -1225,7 +1225,18 @@ class GameCanvas {
     this._lastPinchCenter = null;
 
     // ── Snap animasyonları ──
-    this.snapAnim = [];   // [{idx, t}]
+    this.snapAnim    = [];   // [{idx, t}]
+    this._snapAnimMap = new Map();
+
+    // ── Board cache ──
+    this._boardCache     = null;
+    this._boardCacheZoom = null;
+
+    // ── Perf cache ──
+    this._isMobile    = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    this._cachedJoined = 0;
+    this._cachedRect   = null;
+    this._rectFrame    = -1;
 
     // ── Z-order ──
     this.zOrder = engine.pieces.map((_, i) => i);
@@ -1261,6 +1272,7 @@ class GameCanvas {
     const dt = Math.min((now - this._lastTime) / 1000, 0.05);
     this._lastTime = now;
     this._update(dt);
+    // Her zaman çiz — parça hareketi veya animasyon olabilir
     this._draw();
     this._rafId = requestAnimationFrame(t => this._loop(t));
   }
@@ -1364,6 +1376,8 @@ class GameCanvas {
   resize(w, h) {
     this.W = w;
     this.H = h;
+    this._boardCache = null;
+    this._cachedRect = null;
   }
 
   // ─────────────────────────────────────────────
@@ -1371,7 +1385,11 @@ class GameCanvas {
   // ─────────────────────────────────────────────
 
   _clientToCanvas(cx, cy) {
-    const rect   = this.canvas.getBoundingClientRect();
+    // getBoundingClientRect pahalı — 30 frame'de bir veya resize'da yenile
+    if (!this._cachedRect || (this._rectFrame++ % 30 === 0)) {
+      this._cachedRect = this.canvas.getBoundingClientRect();
+    }
+    const rect   = this._cachedRect;
     const scaleX = this.canvas.width  / rect.width;
     const scaleY = this.canvas.height / rect.height;
     return {
@@ -1402,9 +1420,13 @@ class GameCanvas {
   // ─────────────────────────────────────────────
 
   _update(dt) {
+    // snapAnim → Map<idx, animObj> for O(1) lookup in _drawPiece
+    const map = this._snapAnimMap || (this._snapAnimMap = new Map());
     this.snapAnim = this.snapAnim.filter(a => {
       a.t += dt * 6;
-      return a.t < 1;
+      if (a.t >= 1) { map.delete(a.idx); return false; }
+      map.set(a.idx, a);
+      return true;
     });
   }
 
@@ -1413,102 +1435,133 @@ class GameCanvas {
   // ─────────────────────────────────────────────
 
   _draw() {
-    const ctx = this.ctx;
-    ctx.clearRect(0, 0, this.W, this.H);
+    const ctx  = this.ctx;
+    const zoom = this.cam.zoom;
 
-    // Arka plan
+    ctx.clearRect(0, 0, this.W, this.H);
     ctx.fillStyle = this.opts.bgColor;
     ctx.fillRect(0, 0, this.W, this.H);
 
-    // ── Dünya transform başlat ──
-    ctx.save();
-    ctx.translate(
-      -this.cam.x * this.cam.zoom,
-      -this.cam.y * this.cam.zoom
-    );
-    ctx.scale(this.cam.zoom, this.cam.zoom);
+    // ── Viewport sınırları (dünya koordinatı) ──
+    const vpLeft   = this.cam.x;
+    const vpTop    = this.cam.y;
+    const vpRight  = this.cam.x + this.W / zoom;
+    const vpBottom = this.cam.y + this.H / zoom;
 
-    this._drawGrid();
+    ctx.save();
+    ctx.translate(-this.cam.x * zoom, -this.cam.y * zoom);
+    ctx.scale(zoom, zoom);
+
+    this._drawGrid(vpLeft, vpTop, vpRight, vpBottom);
     this._drawBoard();
-    this._drawJoinedOnBoard();
+    this._drawJoinedOnBoard(vpLeft, vpTop, vpRight, vpBottom);
+
+    // Snap animasyon map — O(1) lookup
+    const snapMap = this._snapAnimMap;
 
     for (const idx of this.zOrder) {
       const p = this.engine.pieces[idx];
-      if (!p.joined) this._drawPiece(ctx, p, idx);
+      if (p.joined) continue;
+
+      // Viewport culling — görünmüyor, atla
+      if (p.x + p.canvasW < vpLeft  || p.x > vpRight  ||
+          p.y + p.canvasH < vpTop   || p.y > vpBottom) continue;
+
+      this._drawPiece(ctx, p, idx, snapMap, zoom);
     }
 
     ctx.restore();
-    // ── Dünya transform bitti ──
-
-    // HUD ekran koordinatında
     this._drawHUD();
   }
 
-  _drawGrid() {
-    if (this.cam.zoom < 0.22) return;
-    const ctx    = this.ctx;
-    const step   = 100;
-    const zoom   = this.cam.zoom;
-    const left   = this.cam.x;
-    const top    = this.cam.y;
-    const right  = this.cam.x + this.W / zoom;
-    const bottom = this.cam.y + this.H / zoom;
+  _drawGrid(vpLeft, vpTop, vpRight, vpBottom) {
+    const zoom = this.cam.zoom;
+    if (zoom < 0.22) return;
+
+    // Çok küçük zoom'da grid gereksiz
+    const ctx  = this.ctx;
+    const step = 100;
 
     ctx.strokeStyle = 'rgba(255,255,255,0.028)';
     ctx.lineWidth   = 1 / zoom;
 
-    const sx = Math.floor(left  / step) * step;
-    const sy = Math.floor(top   / step) * step;
+    const sx = Math.floor(vpLeft / step) * step;
+    const sy = Math.floor(vpTop  / step) * step;
 
-    for (let wx = sx; wx < right;  wx += step) {
-      ctx.beginPath(); ctx.moveTo(wx, top); ctx.lineTo(wx, bottom); ctx.stroke();
-    }
-    for (let wy = sy; wy < bottom; wy += step) {
-      ctx.beginPath(); ctx.moveTo(left, wy); ctx.lineTo(right, wy); ctx.stroke();
-    }
+    // beginPath bir kez aç, tüm çizgileri ekle, bir stroke
+    ctx.beginPath();
+    for (let wx = sx; wx < vpRight;  wx += step) { ctx.moveTo(wx, vpTop); ctx.lineTo(wx, vpBottom); }
+    for (let wy = sy; wy < vpBottom; wy += step) { ctx.moveTo(vpLeft, wy); ctx.lineTo(vpRight, wy); }
+    ctx.stroke();
   }
 
   _drawBoard() {
     const ctx  = this.ctx;
     const e    = this.engine;
-    const bx   = this.boardOffX;
-    const by   = this.boardOffY;
-    const bw   = e.cols * e.dispW;
-    const bh   = e.rows * e.dispH;
     const zoom = this.cam.zoom;
 
-    // Gölge
-    ctx.shadowColor   = 'rgba(0,0,0,0.65)';
-    ctx.shadowBlur    = 40 / zoom;
-    ctx.shadowOffsetX = 8  / zoom;
-    ctx.shadowOffsetY = 8  / zoom;
+    // Board cache: zoom değişince yeniden oluştur
+    // Izgara çizgileri ayrı bir offscreen canvas'a pre-render edilir
+    if (!this._boardCache || this._boardCacheZoom !== zoom) {
+      this._buildBoardCache(zoom);
+    }
 
-    ctx.fillStyle = this.opts.boardColor;
+    const bx = this.boardOffX;
+    const by = this.boardOffY;
+    const bw = e.cols * e.dispW;
+    const bh = e.rows * e.dispH;
+
+    // Gölge sadece board fill için, cache kullanmadan
+    ctx.shadowColor   = 'rgba(0,0,0,0.55)';
+    ctx.shadowBlur    = 30 / zoom;
+    ctx.shadowOffsetX = 6  / zoom;
+    ctx.shadowOffsetY = 6  / zoom;
+    ctx.fillStyle     = this.opts.boardColor;
     ctx.beginPath();
     ctx.roundRect(bx, by, bw, bh, 8 / zoom);
     ctx.fill();
     ctx.shadowColor = 'transparent';
     ctx.shadowBlur  = 0;
 
-    // Border
-    ctx.strokeStyle = 'rgba(120,120,255,0.14)';
-    ctx.lineWidth   = 1.5 / zoom;
-    ctx.stroke();
-
-    // Izgara kılavuz çizgileri
-    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
-    ctx.lineWidth   = 0.5 / zoom;
-    for (let c = 0; c <= e.cols; c++) {
-      const x = bx + c * e.dispW;
-      ctx.beginPath(); ctx.moveTo(x, by); ctx.lineTo(x, by + bh); ctx.stroke();
-    }
-    for (let r = 0; r <= e.rows; r++) {
-      const y = by + r * e.dispH;
-      ctx.beginPath(); ctx.moveTo(bx, y); ctx.lineTo(bx + bw, y); ctx.stroke();
-    }
+    // Cache'den ızgara + border
+    ctx.drawImage(this._boardCache, bx, by, bw, bh);
   }
 
-  _drawJoinedOnBoard() {
+  _buildBoardCache(zoom) {
+    const e  = this.engine;
+    const bw = e.cols * e.dispW;
+    const bh = e.rows * e.dispH;
+    const cv = document.createElement('canvas');
+    cv.width  = Math.ceil(bw);
+    cv.height = Math.ceil(bh);
+    const c   = cv.getContext('2d');
+
+    // Border
+    c.strokeStyle = 'rgba(120,120,255,0.14)';
+    c.lineWidth   = 1.5 / zoom;
+    c.beginPath();
+    c.roundRect(0, 0, bw, bh, 8 / zoom);
+    c.stroke();
+
+    // Izgara — tek beginPath
+    c.strokeStyle = 'rgba(255,255,255,0.04)';
+    c.lineWidth   = 0.5 / zoom;
+    c.beginPath();
+    for (let col = 0; col <= e.cols; col++) {
+      const x = col * e.dispW;
+      c.moveTo(x, 0); c.lineTo(x, bh);
+    }
+    for (let row = 0; row <= e.rows; row++) {
+      const y = row * e.dispH;
+      c.moveTo(0, y); c.lineTo(bw, y);
+    }
+    c.stroke();
+
+    this._boardCache     = cv;
+    this._boardCacheZoom = zoom;
+  }
+
+  _drawJoinedOnBoard(vpLeft, vpTop, vpRight, vpBottom) {
     const ctx     = this.ctx;
     const e       = this.engine;
     const atlases = e.atlases;
@@ -1516,6 +1569,9 @@ class GameCanvas {
       if (!p.joined) continue;
       const dx = this.boardOffX + p.col * e.dispW - p.padding;
       const dy = this.boardOffY + p.row * e.dispH - p.padding;
+      // Viewport culling
+      if (dx + p.canvasW < vpLeft || dx > vpRight ||
+          dy + p.canvasH < vpTop  || dy > vpBottom) continue;
       ctx.drawImage(
         atlases[p.atlasIdx].canvas,
         p.atlasX, p.atlasY, p.atlasW, p.atlasH,
@@ -1524,67 +1580,73 @@ class GameCanvas {
     }
   }
 
-  _drawPiece(ctx, piece, idx) {
+  _drawPiece(ctx, piece, idx, snapMap, zoom) {
     const isDragging = this.drag && (
       this.drag.idx === idx ||
       (piece.groupId !== null &&
         this.engine.pieces[this.drag.idx]?.groupId === piece.groupId)
     );
-    const snapA   = this.snapAnim.find(a => a.idx === idx);
-    const zoom    = this.cam.zoom;
-    const atlas   = this.engine.atlases[piece.atlasIdx];
+    const snapA = snapMap ? snapMap.get(idx) : null;
 
-    ctx.save();
-
-    if (isDragging) {
-      ctx.shadowColor   = 'rgba(0,0,0,0.6)';
-      ctx.shadowBlur    = 22 / zoom;
-      ctx.shadowOffsetX = 4  / zoom;
-      ctx.shadowOffsetY = 6  / zoom;
+    // Shadow sadece sürükleme veya snap animasyonu varsa — mobil GPU için kritik
+    if (isDragging || snapA) {
+      ctx.save();
+      if (isDragging) {
+        ctx.shadowColor   = 'rgba(0,0,0,0.5)';
+        ctx.shadowBlur    = 16 / zoom;
+        ctx.shadowOffsetX = 3  / zoom;
+        ctx.shadowOffsetY = 5  / zoom;
+      } else if (snapA) {
+        const pulse       = Math.sin(snapA.t * Math.PI);
+        ctx.shadowColor   = `rgba(100,200,255,${0.8 * pulse})`;
+        ctx.shadowBlur    = 24 / zoom * pulse;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
+      }
+      ctx.drawImage(
+        this.engine.atlases[piece.atlasIdx].canvas,
+        piece.atlasX, piece.atlasY, piece.atlasW, piece.atlasH,
+        piece.x, piece.y, piece.canvasW, piece.canvasH
+      );
+      ctx.restore();
+    } else {
+      // Save/restore yok — en hızlı yol
+      ctx.drawImage(
+        this.engine.atlases[piece.atlasIdx].canvas,
+        piece.atlasX, piece.atlasY, piece.atlasW, piece.atlasH,
+        piece.x, piece.y, piece.canvasW, piece.canvasH
+      );
     }
-
-    if (snapA) {
-      const pulse       = Math.sin(snapA.t * Math.PI);
-      ctx.shadowColor   = `rgba(100,200,255,${0.9 * pulse})`;
-      ctx.shadowBlur    = 30 / zoom * pulse;
-      ctx.shadowOffsetX = 0;
-      ctx.shadowOffsetY = 0;
-    }
-
-    ctx.drawImage(
-      atlas.canvas,
-      piece.atlasX, piece.atlasY, piece.atlasW, piece.atlasH,
-      piece.x, piece.y, piece.canvasW, piece.canvasH
-    );
-    ctx.restore();
   }
 
   _drawHUD() {
     const ctx    = this.ctx;
-    const joined = this.engine.joinedCount();
+    // joinedCount() her frame pieces.filter() yapıyor — önbellek kullan
+    const joined = this._cachedJoined ?? 0;
     const total  = this.engine.totalPieces;
-    const pct    = Math.round(joined / total * 100);
+    const pct    = total > 0 ? Math.round(joined / total * 100) : 0;
 
     const barX = 15, barY = 15, barW = 220, barH = 6;
 
     ctx.fillStyle = 'rgba(255,255,255,0.08)';
     ctx.beginPath(); ctx.roundRect(barX, barY, barW, barH, 3); ctx.fill();
 
-    ctx.fillStyle = 'rgba(61,220,132,0.85)';
-    ctx.beginPath(); ctx.roundRect(barX, barY, barW * (joined / total), barH, 3); ctx.fill();
+    if (joined > 0) {
+      ctx.fillStyle = 'rgba(61,220,132,0.85)';
+      ctx.beginPath(); ctx.roundRect(barX, barY, barW * (joined / total), barH, 3); ctx.fill();
+    }
 
     ctx.fillStyle = 'rgba(255,255,255,0.6)';
     ctx.font      = '12px monospace';
     ctx.fillText(`${joined} / ${total}  (${pct}%)`, barX, barY + 22);
 
-    const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
     ctx.fillStyle = 'rgba(255,255,255,0.18)';
     ctx.font      = '11px monospace';
-    ctx.fillText(`zoom ${this.cam.zoom.toFixed(2)}×`, barX, this.H - 30);
-    if (isMobile) {
-      ctx.fillText('1 parmak: sürükle/kaydır  |  2 parmak: zoom', barX, this.H - 14);
-    } else {
+    if (!this._isMobile) {
+      ctx.fillText(`zoom ${this.cam.zoom.toFixed(2)}×`, barX, this.H - 30);
       ctx.fillText('Scroll: zoom  |  Sağ/orta tuş: pan  |  ↺ Dağıt  |  ⌂ Tahta', barX, this.H - 14);
+    } else {
+      ctx.fillText('1 parmak: sürükle/kaydır  |  2 parmak: zoom', barX, this.H - 14);
     }
   }
 
@@ -1599,13 +1661,19 @@ class GameCanvas {
       const group = piece.groupId !== null
         ? [...this.engine.groups.get(piece.groupId)]
         : [idx];
-      for (const gi of group) this.snapAnim.push({ idx: gi, t: 0 });
+      for (const gi of group) {
+        this.snapAnim.push({ idx: gi, t: 0 });
+        this._snapAnimMap.set(gi, this.snapAnim[this.snapAnim.length - 1]);
+      }
     }
 
     this._checkJoined(idx);
 
+    // joined sayısını güncelle (her frame filter() yerine)
+    this._cachedJoined = this.engine.joinedCount();
+
     if (this.opts.onProgress)
-      this.opts.onProgress(this.engine.joinedCount(), this.engine.totalPieces);
+      this.opts.onProgress(this._cachedJoined, this.engine.totalPieces);
     if (this.engine.isComplete() && this.opts.onComplete)
       this.opts.onComplete();
   }
