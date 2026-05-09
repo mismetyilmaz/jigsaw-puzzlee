@@ -1232,6 +1232,11 @@ class GameCanvas {
     this._boardCache     = null;
     this._boardCacheZoom = null;
 
+    // ── Joined canvas (pre-rendered) ──
+    this._joinedCv    = null;
+    this._joinedCtx   = null;
+    this._joinedDirty = true;
+
     // ── Perf cache ──
     this._isMobile    = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
     this._cachedJoined = 0;
@@ -1243,6 +1248,10 @@ class GameCanvas {
 
     // ── İlk dağıtma ──
     this._scatterPieces(engine.seed + 77777, false);
+
+    // ── Spatial grid ──
+    this._buildSpatialGrid();
+    for (const p of engine.pieces) this._sgUpdate(p);
 
     // ── Events ──
     this._bindEvents();
@@ -1259,22 +1268,47 @@ class GameCanvas {
 
   start() {
     this.running = true;
-    this._loop(performance.now());
+    this._dirty  = true;
+    this._scheduleFrame();
   }
 
   stop() {
     this.running = false;
-    if (this._rafId) cancelAnimationFrame(this._rafId);
+    if (this._rafId) { cancelAnimationFrame(this._rafId); this._rafId = null; }
+  }
+
+  /** Bir sonraki frame'i planla — dirty değilse atla */
+  _scheduleFrame() {
+    if (this._rafId || !this.running) return;
+    this._rafId = requestAnimationFrame(t => this._loop(t));
+  }
+
+  /** Sahneyi "kirli" işaretle ve frame planla */
+  _markDirty() {
+    this._dirty = true;
+    this._scheduleFrame();
   }
 
   _loop(now) {
+    this._rafId = null;
     if (!this.running) return;
     const dt = Math.min((now - this._lastTime) / 1000, 0.05);
     this._lastTime = now;
+
+    const hadAnim = this.snapAnim.length > 0;
     this._update(dt);
-    // Her zaman çiz — parça hareketi veya animasyon olabilir
-    this._draw();
-    this._rafId = requestAnimationFrame(t => this._loop(t));
+    const hasAnim = this.snapAnim.length > 0;
+
+    // Animasyon devam ediyorsa dirty say
+    if (hasAnim || hadAnim) this._dirty = true;
+
+    if (this._dirty) {
+      this._draw();
+      this._dirty = false;
+    }
+
+    // Animasyon hâlâ varsa bir sonraki frame'i planla
+    if (hasAnim) this._scheduleFrame();
   }
 
   // ─────────────────────────────────────────────
@@ -1354,8 +1388,10 @@ class GameCanvas {
 
   /** Public: joined olmayan parçaları yeniden dağıt */
   redistributePieces() {
-  this._scatterPieces(Date.now() & 0xFFFFFF, true);
-}
+    this._scatterPieces(Date.now() & 0xFFFFFF, true);
+    this._markDirty();
+  }
+
   /** Public: tahtayı ekran ortasına getir */
   centerBoard() {
     const e      = this.engine;
@@ -1371,6 +1407,7 @@ class GameCanvas {
     this.cam.zoom = zoom;
     this.cam.x    = cx - (this.W / 2) / zoom;
     this.cam.y    = cy - (this.H / 2) / zoom;
+    this._markDirty();
   }
 
   resize(w, h) {
@@ -1454,6 +1491,9 @@ class GameCanvas {
 
     this._drawGrid(vpLeft, vpTop, vpRight, vpBottom);
     this._drawBoard();
+
+    // Joined canvas ilk render'da yoksa oluştur
+    if (!this._joinedCv) this._rebuildJoinedCanvas();
     this._drawJoinedOnBoard(vpLeft, vpTop, vpRight, vpBottom);
 
     // Snap animasyon map — O(1) lookup
@@ -1561,23 +1601,44 @@ class GameCanvas {
     this._boardCacheZoom = zoom;
   }
 
-  _drawJoinedOnBoard(vpLeft, vpTop, vpRight, vpBottom) {
-    const ctx     = this.ctx;
-    const e       = this.engine;
+  /** Joined parça eklenince joined canvas'ını güncelle */
+  _rebuildJoinedCanvas() {
+    const e   = this.engine;
+    const bw  = Math.ceil(e.cols * e.dispW);
+    const bh  = Math.ceil(e.rows * e.dispH);
+
+    if (!this._joinedCv || this._joinedCv.width !== bw || this._joinedCv.height !== bh) {
+      this._joinedCv  = document.createElement('canvas');
+      this._joinedCv.width  = bw;
+      this._joinedCv.height = bh;
+      this._joinedCtx = this._joinedCv.getContext('2d');
+    }
+
+    const jctx    = this._joinedCtx;
     const atlases = e.atlases;
+    jctx.clearRect(0, 0, bw, bh);
     for (const p of e.pieces) {
       if (!p.joined) continue;
-      const dx = this.boardOffX + p.col * e.dispW - p.padding;
-      const dy = this.boardOffY + p.row * e.dispH - p.padding;
-      // Viewport culling
-      if (dx + p.canvasW < vpLeft || dx > vpRight ||
-          dy + p.canvasH < vpTop  || dy > vpBottom) continue;
-      ctx.drawImage(
+      const dx = p.col * e.dispW - p.padding;
+      const dy = p.row * e.dispH - p.padding;
+      jctx.drawImage(
         atlases[p.atlasIdx].canvas,
         p.atlasX, p.atlasY, p.atlasW, p.atlasH,
         dx, dy, p.canvasW, p.canvasH
       );
     }
+    this._joinedDirty = false;
+  }
+
+  _drawJoinedOnBoard(vpLeft, vpTop, vpRight, vpBottom) {
+    if (!this._joinedCv) return;
+    // Viewport culling — board tamamen dışarıdaysa atla
+    const bx = this.boardOffX;
+    const by = this.boardOffY;
+    const bw = this._joinedCv.width;
+    const bh = this._joinedCv.height;
+    if (bx + bw < vpLeft || bx > vpRight || by + bh < vpTop || by > vpBottom) return;
+    this.ctx.drawImage(this._joinedCv, bx, by);
   }
 
   _drawPiece(ctx, piece, idx, snapMap, zoom) {
@@ -1668,6 +1729,15 @@ class GameCanvas {
     }
 
     this._checkJoined(idx);
+    this._rebuildJoinedCanvas();
+
+    // Snap sonrası spatial grid güncelle (grup taşındı)
+    const piece2 = this.engine.pieces[idx];
+    if (piece2.groupId !== null) {
+      for (const mi of this.engine.groups.get(piece2.groupId)) this._sgUpdate(this.engine.pieces[mi]);
+    } else {
+      this._sgUpdate(piece2);
+    }
 
     // joined sayısını güncelle (her frame filter() yerine)
     this._cachedJoined = this.engine.joinedCount();
@@ -1722,6 +1792,7 @@ class GameCanvas {
       this.cam.y -= (sy - this.panning.lastSY) / this.cam.zoom;
       this.panning.lastSX = sx;
       this.panning.lastSY = sy;
+      this._markDirty();
       return;
     }
     if (!this.drag) return;
@@ -1799,6 +1870,7 @@ class GameCanvas {
       if (this._lastPinchCenter) {
         this.cam.x -= (newCenter.sx - this._lastPinchCenter.sx) / this.cam.zoom;
         this.cam.y -= (newCenter.sy - this._lastPinchCenter.sy) / this.cam.zoom;
+        this._markDirty();
       }
 
       this.pinchDist        = newDist;
@@ -1822,6 +1894,7 @@ class GameCanvas {
       this.cam.y -= (sy - this.panning.lastSY) / this.cam.zoom;
       this.panning.lastSX = sx;
       this.panning.lastSY = sy;
+      this._markDirty();
     }
   }
 
@@ -1915,9 +1988,80 @@ class GameCanvas {
     this.drag.lastWX = wx;
     this.drag.lastWY = wy;
     this.engine.moveGroupOf(this.drag.idx, dx, dy);
+    this._sgUpdateGroup(this.drag.idx);
+    this._markDirty();
+  }
+
+  /** Spatial grid — her piece move sonrası güncellenir */
+  _buildSpatialGrid() {
+    // Hücre boyutu: ortalama parça boyutunun 2 katı
+    const e        = this.engine;
+    const cellSize = Math.max(e.dispW, e.dispH) * 2.5;
+    this._sgCellSize = cellSize;
+    this._sgGrid     = new Map();
+  }
+
+  _sgKey(cx, cy) { return (cx << 16) | (cy & 0xFFFF); }
+
+  _sgUpdate(piece) {
+    // Eski hücreden çıkar
+    if (piece._sgCells) {
+      for (const key of piece._sgCells) {
+        const bucket = this._sgGrid.get(key);
+        if (bucket) { bucket.delete(piece.idx); if (!bucket.size) this._sgGrid.delete(key); }
+      }
+    }
+    if (piece.joined) { piece._sgCells = null; return; }
+
+    const cs   = this._sgCellSize;
+    const x0   = Math.floor(piece.x / cs);
+    const y0   = Math.floor(piece.y / cs);
+    const x1   = Math.floor((piece.x + piece.canvasW) / cs);
+    const y1   = Math.floor((piece.y + piece.canvasH) / cs);
+    const cells = [];
+    for (let cx = x0; cx <= x1; cx++) {
+      for (let cy = y0; cy <= y1; cy++) {
+        const key = this._sgKey(cx, cy);
+        if (!this._sgGrid.has(key)) this._sgGrid.set(key, new Set());
+        this._sgGrid.get(key).add(piece.idx);
+        cells.push(key);
+      }
+    }
+    piece._sgCells = cells;
+  }
+
+  _sgUpdateGroup(idx) {
+    const piece = this.engine.pieces[idx];
+    if (piece.groupId !== null) {
+      for (const mi of this.engine.groups.get(piece.groupId)) this._sgUpdate(this.engine.pieces[mi]);
+    } else {
+      this._sgUpdate(piece);
+    }
   }
 
   _findPieceAt(wx, wy) {
+    if (!this._sgGrid) return this._findPieceAtLinear(wx, wy);
+    const cs  = this._sgCellSize;
+    const cx  = Math.floor(wx / cs);
+    const cy  = Math.floor(wy / cs);
+    const key = this._sgKey(cx, cy);
+    const bucket = this._sgGrid.get(key);
+    if (!bucket) return -1;
+
+    // Z-order içinde en üsttekini bul
+    let best = -1, bestZ = -1;
+    for (const idx of bucket) {
+      const p = this.engine.pieces[idx];
+      if (p.joined) continue;
+      if (wx >= p.x && wx <= p.x + p.canvasW && wy >= p.y && wy <= p.y + p.canvasH) {
+        const z = this.zOrder.indexOf(idx);
+        if (z > bestZ) { bestZ = z; best = idx; }
+      }
+    }
+    return best;
+  }
+
+  _findPieceAtLinear(wx, wy) {
     for (let zi = this.zOrder.length - 1; zi >= 0; zi--) {
       const idx   = this.zOrder[zi];
       const piece = this.engine.pieces[idx];
@@ -1943,6 +2087,7 @@ class GameCanvas {
     this.cam.zoom = newZoom;
     this.cam.x    = wx - sx / newZoom;
     this.cam.y    = wy - sy / newZoom;
+    this._markDirty();
   }
 
   // ─────────────────────────────────────────────
