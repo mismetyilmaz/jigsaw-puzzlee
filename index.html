@@ -1513,7 +1513,7 @@ class GameCanvas {
       if (p.joined) continue;
       const tx     = this.boardOffX + p.col * e.dispW - p.padding;
       const ty     = this.boardOffY + p.row * e.dispH - p.padding;
-      const thresh = this.opts.snapThreshold * 2.5;
+      const thresh = this.opts.snapThreshold * 1.4;
       if (Math.abs(p.x - tx) < thresh && Math.abs(p.y - ty) < thresh) {
         p.joined = true;
         p.x      = tx;
@@ -1890,7 +1890,7 @@ async function startGame(seed, pieces) {
 
   if (gameCanvas) gameCanvas.stop();
   gameCanvas = new GameCanvas(canvas, engine, {
-    snapThreshold: Math.max(14, engine.dispW * 0.18) * ('ontouchstart' in window || navigator.maxTouchPoints > 0 ? 1.8 : 1),
+    snapThreshold: Math.max(10, engine.dispW * 0.12) * ('ontouchstart' in window || navigator.maxTouchPoints > 0 ? 1.8 : 1),
     onProgress: (joined, total) => {
       document.getElementById('progress-display').textContent = `${joined} / ${total} parça`;
     },
