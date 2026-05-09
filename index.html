@@ -1581,8 +1581,7 @@ class GameCanvas {
     if (count === 1) {
       // İlk parmak: parçaya değiyor mu bak
       const { x, y } = this._getPos(e);
-      const isTouch = e.pointerType === 'touch';
-      const hit = this._findPieceAt(x, y, isTouch);
+      const hit = this._findPieceAt(x, y);
       if (hit !== -1) {
         // Parça sürükleme: panning'i iptal et
         this.panning = null;
@@ -1741,15 +1740,13 @@ class GameCanvas {
     this.engine.moveGroupOf(this.drag.idx, dx, dy);
   }
 
-  _findPieceAt(wx, wy, isTouchInput = false) {
-    // Mobilzde hit area'yı büyüt (küçük parçalara parmakla dokunmak zor)
-    const margin = isTouchInput ? Math.max(this.engine.dispW * 0.3, 12) : 0;
+  _findPieceAt(wx, wy) {
     for (let zi = this.zOrder.length - 1; zi >= 0; zi--) {
       const idx   = this.zOrder[zi];
       const piece = this.engine.pieces[idx];
       if (piece.joined) continue;
-      if (wx >= piece.x - margin && wx <= piece.x + piece.canvasW + margin &&
-          wy >= piece.y - margin && wy <= piece.y + piece.canvasH + margin) {
+      if (wx >= piece.x && wx <= piece.x + piece.canvasW &&
+          wy >= piece.y && wy <= piece.y + piece.canvasH) {
         return idx;
       }
     }
