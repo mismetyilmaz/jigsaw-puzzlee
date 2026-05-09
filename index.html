@@ -2,7 +2,7 @@
 <html lang="tr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>PuzzleWar — Offline Demo</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -31,6 +31,9 @@
     font-family: var(--mono);
     overflow: hidden;
     user-select: none;
+    touch-action: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
   }
 
   /* ── MENÜ EKRANI ── */
@@ -509,7 +512,7 @@ function generatePalette(rng) {
  * @param {number} size - Çıktı çözünürlüğü (default 2400)
  * @returns {HTMLCanvasElement}
  */
-function generateImage(seed, size = 2400) {
+function generateImage(seed, size = 15000) {
   const rng    = new SeededRandom(seed);
   const canvas = document.createElement('canvas');
   canvas.width  = size;
@@ -722,6 +725,12 @@ class PuzzleEngine {
     this.displayScale = displayScale;
     this.dispW = this.pieceW * displayScale;
     this.dispH = this.pieceH * displayScale;
+
+    // Yüksek çözünürlük: parça canvas'ı ekranda ne kadar küçük olursa
+    // olsun en az MIN_PIECE_PX piksel olsun (keskin görüntü için).
+    const MIN_PIECE_PX = 300;
+    this.pieceScale = Math.max(1, MIN_PIECE_PX / Math.min(this.dispW, this.dispH));
+
     this.pieces = [];
 
     for (let r = 0; r < this.rows; r++) {
@@ -736,12 +745,17 @@ class PuzzleEngine {
 
   /** Tek parça objesi oluşturur */
   _buildPiece(row, col, idx) {
-    const TAB_SIZE  = Math.min(this.dispW, this.dispH) * 0.28; // tab dışarı taşma miktarı
+    // ps: yüksek çözünürlük çarpanı
+    const ps        = this.pieceScale;
+    const pDispW    = this.dispW * ps;
+    const pDispH    = this.dispH * ps;
+
+    const TAB_SIZE  = Math.min(pDispW, pDispH) * 0.28; // tab dışarı taşma miktarı (yüksek res)
     const padding   = TAB_SIZE + 4;
 
-    // Ekran canvas boyutu: parça + tab taşmaları
-    const canvasW   = Math.ceil(this.dispW + padding * 2);
-    const canvasH   = Math.ceil(this.dispH + padding * 2);
+    // Yüksek çözünürlüklü canvas boyutu
+    const canvasW   = Math.ceil(pDispW + padding * 2);
+    const canvasH   = Math.ceil(pDispH + padding * 2);
 
     const cv  = document.createElement('canvas');
     cv.width  = canvasW;
@@ -754,62 +768,48 @@ class PuzzleEngine {
     const leftTab   = col > 0             ? -this.edges[row][col-1].right    : 0;
     const rightTab  = col < this.cols - 1 ?  this.edges[row][col].right      : 0;
 
-    // Clip path çiz
+    // Clip path çiz (yüksek çözünürlüklü koordinatlarda)
     ctx.save();
-    this._drawPiecePath(ctx, padding, padding, this.dispW, this.dispH,
+    this._drawPiecePath(ctx, padding, padding, pDispW, pDispH,
       topTab, rightTab, bottomTab, leftTab, TAB_SIZE);
     ctx.clip();
 
-    // Kaynak görseli bu bölgeye çiz
+    // Kaynak görseli yüksek çözünürlüklü canvas'a çiz
+    // srcTabPx: padding'in kaynak piksel uzayındaki karşılığı
+    const srcPaddingPx = padding / ps;
     ctx.drawImage(
       this.source,
-      col * this.pieceW,           // sx
-      row * this.pieceH,           // sy
-      this.pieceW * (1 + 2 * 0.3), // sw (tab taşmaları dahil - yaklaşık)
-      this.pieceH * (1 + 2 * 0.3), // sh
-      padding - this.dispW * 0.3,  // dx
-      padding - this.dispH * 0.3,  // dy
-      this.dispW * 1.6,            // dw
-      this.dispH * 1.6             // dh
-    );
-
-    // Doğru kırpma: sadece bu parçanın pikselleri
-    ctx.restore();
-
-    // Yeniden temiz çizim - kaynak görseli tam offsetle çiz
-    ctx.clearRect(0, 0, canvasW, canvasH);
-    ctx.save();
-    this._drawPiecePath(ctx, padding, padding, this.dispW, this.dispH,
-      topTab, rightTab, bottomTab, leftTab, TAB_SIZE);
-    ctx.clip();
-
-    ctx.drawImage(
-      this.source,
-      col * this.pieceW - TAB_SIZE / this.displayScale,
-      row * this.pieceH - TAB_SIZE / this.displayScale,
-      canvasW / this.displayScale,
-      canvasH / this.displayScale,
-      0, 0, canvasW, canvasH
+      col * this.pieceW - srcPaddingPx,     // sx: parça başlangıcı - padding
+      row * this.pieceH - srcPaddingPx,     // sy
+      this.pieceW + srcPaddingPx * 2,       // sw: parça genişliği + iki kenar padding
+      this.pieceH + srcPaddingPx * 2,       // sh
+      0, 0, canvasW, canvasH                // hedef: tüm canvas
     );
     ctx.restore();
 
-    // Outline çiz
+    // Outline (yüksek çözünürlüklü)
     ctx.save();
-    this._drawPiecePath(ctx, padding, padding, this.dispW, this.dispH,
+    this._drawPiecePath(ctx, padding, padding, pDispW, pDispH,
       topTab, rightTab, bottomTab, leftTab, TAB_SIZE);
     ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-    ctx.lineWidth   = 1.5;
+    ctx.lineWidth   = 1.5 * ps;
     ctx.stroke();
     ctx.restore();
+
+    // Ekran (dünya) koordinatına geri dönüştürülmüş boyutlar
+    const drawPadding = padding / ps;
+    const drawW = canvasW / ps;
+    const drawH = canvasH / ps;
 
     return {
       idx,
       row,
       col,
       canvas:    cv,
-      padding,
-      canvasW,
-      canvasH,
+      padding:   drawPadding,  // dünya koordinatında (ekran birimi)
+      canvasW:   drawW,        // dünya koordinatında canvas boyutu
+      canvasH:   drawH,
+      pieceScale: ps,
       // Oyun dünya koordinatı (parçanın sol-üst noktası, padding dahil değil)
       x: 0,
       y: 0,
@@ -1413,7 +1413,9 @@ class GameCanvas {
       ctx.drawImage(
         p.canvas,
         this.boardOffX + p.col * e.dispW - p.padding,
-        this.boardOffY + p.row * e.dispH - p.padding
+        this.boardOffY + p.row * e.dispH - p.padding,
+        p.canvasW,
+        p.canvasH
       );
     }
   }
@@ -1444,7 +1446,7 @@ class GameCanvas {
       ctx.shadowOffsetY = 0;
     }
 
-    ctx.drawImage(piece.canvas, piece.x, piece.y);
+    ctx.drawImage(piece.canvas, piece.x, piece.y, piece.canvasW, piece.canvasH);
     ctx.restore();
   }
 
@@ -1466,10 +1468,15 @@ class GameCanvas {
     ctx.font      = '12px monospace';
     ctx.fillText(`${joined} / ${total}  (${pct}%)`, barX, barY + 22);
 
+    const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
     ctx.fillStyle = 'rgba(255,255,255,0.18)';
     ctx.font      = '11px monospace';
     ctx.fillText(`zoom ${this.cam.zoom.toFixed(2)}×`, barX, this.H - 30);
-    ctx.fillText('Scroll: zoom  |  Sağ/orta tuş: pan  |  ↺ Dağıt  |  ⌂ Tahta', barX, this.H - 14);
+    if (isMobile) {
+      ctx.fillText('1 parmak: sürükle/kaydır  |  2 parmak: zoom', barX, this.H - 14);
+    } else {
+      ctx.fillText('Scroll: zoom  |  Sağ/orta tuş: pan  |  ↺ Dağıt  |  ⌂ Tahta', barX, this.H - 14);
+    }
   }
 
   // ─────────────────────────────────────────────
@@ -1560,52 +1567,78 @@ class GameCanvas {
   }
 
   // ─────────────────────────────────────────────
-  // POINTER EVENTS (touch)
+  // POINTER EVENTS (touch + mouse unified)
   // ─────────────────────────────────────────────
 
   _onPointerDown(e) {
-    this.canvas.setPointerCapture(e.pointerId);
+    e.preventDefault();
+    try { this.canvas.setPointerCapture(e.pointerId); } catch(_) {}
+
     this.touches[e.pointerId] = { x: e.clientX, y: e.clientY };
-    const count = Object.keys(this.touches).length;
+    const ids   = Object.keys(this.touches);
+    const count = ids.length;
 
     if (count === 1) {
+      // İlk parmak: parçaya değiyor mu bak
       const { x, y } = this._getPos(e);
-      const hit       = this._findPieceAt(x, y);
+      const isTouch = e.pointerType === 'touch';
+      const hit = this._findPieceAt(x, y, isTouch);
       if (hit !== -1) {
+        // Parça sürükleme: panning'i iptal et
+        this.panning = null;
         this._startDragIdx(hit, x, y);
       } else {
+        // Boş alan: pan modu
+        this.drag = null;
         const { sx, sy } = this._getScreenPos(e);
         this.panning = { lastSX: sx, lastSY: sy };
       }
     } else if (count === 2) {
+      // İkinci parmak geldi: drag/pan durdur, pinch başlat
       this.drag    = null;
       this.panning = null;
-      this.pinchDist = this._getPinchDist();
+      this.pinchDist        = this._getPinchDist();
+      this._lastPinchCenter = this._getPinchCenterScreen();
     }
   }
 
   _onPointerMove(e) {
+    e.preventDefault();
     if (!this.touches[e.pointerId]) return;
+
     this.touches[e.pointerId] = { x: e.clientX, y: e.clientY };
     const count = Object.keys(this.touches).length;
 
-    if (count === 2) {
-      const newDist = this._getPinchDist();
+    if (count >= 2) {
+      // Pinch-zoom + pan
+      const newDist   = this._getPinchDist();
+      const newCenter = this._getPinchCenterScreen();
+
       if (this.pinchDist && newDist > 0) {
-        const center  = this._getPinchCenter();
-        const { sx, sy } = this._clientToCanvas(center.x, center.y);
-        this._applyZoom(newDist / this.pinchDist, sx, sy);
-        if (this._lastPinchCenter) {
-          this.cam.x -= (sx - this._lastPinchCenter.sx) / this.cam.zoom;
-          this.cam.y -= (sy - this._lastPinchCenter.sy) / this.cam.zoom;
-        }
-        this._lastPinchCenter = { sx, sy };
+        // Zoom: merkeze göre
+        this._applyZoom(newDist / this.pinchDist, newCenter.sx, newCenter.sy);
       }
-      this.pinchDist = newDist;
+
+      // Pinch merkezi kaydıysa pan
+      if (this._lastPinchCenter) {
+        this.cam.x -= (newCenter.sx - this._lastPinchCenter.sx) / this.cam.zoom;
+        this.cam.y -= (newCenter.sy - this._lastPinchCenter.sy) / this.cam.zoom;
+      }
+
+      this.pinchDist        = newDist;
+      this._lastPinchCenter = newCenter;
       return;
     }
 
+    // Tek parmak
     this._lastPinchCenter = null;
+    this.pinchDist        = null;
+
+    if (this.drag) {
+      const { x, y } = this._getPos(e);
+      this._moveDrag(x, y);
+      return;
+    }
 
     if (this.panning) {
       const { sx, sy } = this._getScreenPos(e);
@@ -1613,23 +1646,44 @@ class GameCanvas {
       this.cam.y -= (sy - this.panning.lastSY) / this.cam.zoom;
       this.panning.lastSX = sx;
       this.panning.lastSY = sy;
-      return;
-    }
-    if (this.drag) {
-      const { x, y } = this._getPos(e);
-      this._moveDrag(x, y);
     }
   }
 
   _onPointerUp(e) {
+    e.preventDefault();
+    const wasTracked = !!this.touches[e.pointerId];
     delete this.touches[e.pointerId];
-    this.pinchDist        = null;
-    this._lastPinchCenter = null;
-    if (this.panning) { this.panning = null; return; }
-    if (this.drag) {
-      const idx = this.drag.idx;
+
+    const count = Object.keys(this.touches).length;
+
+    // Pinch bitti, kalan tek parmak için sıfırla
+    if (count < 2) {
+      this.pinchDist        = null;
+      this._lastPinchCenter = null;
+    }
+
+    if (count === 1) {
+      // Bir parmak kaldı: drag/pan yok, pan moduna geç
       this.drag = null;
-      this._afterDrop(idx);
+      const remaining = Object.values(this.touches)[0];
+      if (remaining) {
+        this.panning = {
+          lastSX: this._clientToCanvas(remaining.x, remaining.y).sx,
+          lastSY: this._clientToCanvas(remaining.x, remaining.y).sy,
+        };
+      }
+      return;
+    }
+
+    if (count === 0) {
+      this.panning = null;
+      if (this.drag && wasTracked) {
+        const idx = this.drag.idx;
+        this.drag = null;
+        this._afterDrop(idx);
+      } else {
+        this.drag = null;
+      }
     }
   }
 
@@ -1647,6 +1701,12 @@ class GameCanvas {
       x: (pts[0].x + pts[1].x) / 2,
       y: (pts[0].y + pts[1].y) / 2,
     };
+  }
+
+  _getPinchCenterScreen() {
+    const c   = this._getPinchCenter();
+    const cvs = this._clientToCanvas(c.x, c.y);
+    return { sx: cvs.sx, sy: cvs.sy };
   }
 
   // ─────────────────────────────────────────────
@@ -1681,13 +1741,15 @@ class GameCanvas {
     this.engine.moveGroupOf(this.drag.idx, dx, dy);
   }
 
-  _findPieceAt(wx, wy) {
+  _findPieceAt(wx, wy, isTouchInput = false) {
+    // Mobilzde hit area'yı büyüt (küçük parçalara parmakla dokunmak zor)
+    const margin = isTouchInput ? Math.max(this.engine.dispW * 0.3, 12) : 0;
     for (let zi = this.zOrder.length - 1; zi >= 0; zi--) {
       const idx   = this.zOrder[zi];
       const piece = this.engine.pieces[idx];
       if (piece.joined) continue;
-      if (wx >= piece.x && wx <= piece.x + piece.canvasW &&
-          wy >= piece.y && wy <= piece.y + piece.canvasH) {
+      if (wx >= piece.x - margin && wx <= piece.x + piece.canvasW + margin &&
+          wy >= piece.y - margin && wy <= piece.y + piece.canvasH + margin) {
         return idx;
       }
     }
@@ -1715,16 +1777,30 @@ class GameCanvas {
 
   _bindEvents() {
     const c = this.canvas;
-    c.addEventListener('mousedown',     e => this._onMouseDown(e));
-    c.addEventListener('mousemove',     e => this._onMouseMove(e));
-    c.addEventListener('mouseup',       e => this._onMouseUp(e));
-    c.addEventListener('mouseleave',    e => this._onMouseUp(e));
-    c.addEventListener('wheel',         e => this._onWheel(e), { passive: false });
-    c.addEventListener('contextmenu',   e => e.preventDefault());
-    c.addEventListener('pointerdown',   e => this._onPointerDown(e));
-    c.addEventListener('pointermove',   e => this._onPointerMove(e));
-    c.addEventListener('pointerup',     e => this._onPointerUp(e));
-    c.addEventListener('pointercancel', e => this._onPointerUp(e));
+
+    // touch-action: none → tarayıcının kendi scroll/zoom'unu engelle
+    c.style.touchAction = 'none';
+    c.style.userSelect  = 'none';
+
+    // Pointer API — hem mouse hem touch hem pen yakalar
+    // Mouse eventlerini AYRI bağlamıyoruz; pointer zaten kapsıyor.
+    c.addEventListener('pointerdown',   e => { if (e.pointerType === 'mouse' && e.button !== 0 && e.button !== 1 && e.button !== 2) return; this._onPointerDown(e); }, { passive: false });
+    c.addEventListener('pointermove',   e => this._onPointerMove(e), { passive: false });
+    c.addEventListener('pointerup',     e => this._onPointerUp(e),   { passive: false });
+    c.addEventListener('pointercancel', e => this._onPointerUp(e),   { passive: false });
+
+    // Sağ/orta tık pan (mouse-only, pointer button kontrolü)
+    c.addEventListener('pointerdown', e => {
+      if (e.pointerType !== 'mouse') return;
+      if (e.button === 1 || e.button === 2) {
+        const { sx, sy } = this._getScreenPos(e);
+        this.panning = { lastSX: sx, lastSY: sy };
+      }
+    }, { passive: false });
+
+    // Wheel zoom
+    c.addEventListener('wheel', e => this._onWheel(e), { passive: false });
+    c.addEventListener('contextmenu', e => e.preventDefault());
   }
 }
 
@@ -1787,7 +1863,7 @@ async function startGame(seed, pieces) {
   await sleep(30);
 
   // 1. Görsel üret
-  const sourceCanvas = ImageGen.generateImage(seed, 1200);
+  const sourceCanvas = ImageGen.generateImage(seed, 15000);
   setLoading('Parçalar kesiliyor…', 40);
   await sleep(30);
 
@@ -1817,7 +1893,7 @@ async function startGame(seed, pieces) {
 
   if (gameCanvas) gameCanvas.stop();
   gameCanvas = new GameCanvas(canvas, engine, {
-    snapThreshold: Math.max(14, engine.dispW * 0.18),
+    snapThreshold: Math.max(14, engine.dispW * 0.18) * ('ontouchstart' in window || navigator.maxTouchPoints > 0 ? 1.8 : 1),
     onProgress: (joined, total) => {
       document.getElementById('progress-display').textContent = `${joined} / ${total} parça`;
     },
